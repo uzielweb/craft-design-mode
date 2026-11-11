@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@design-mode/vector-core": ["packages/vector-core/src/index.ts"],
+      "@design-mode/vector-core/*": ["packages/vector-core/src/*"],
+      "@design-mode/host-bridge": ["packages/host-bridge/src/index.ts"],
+      "@design-mode/host-bridge/*": ["packages/host-bridge/src/*"],
+      "@design-mode/ui-panels": ["packages/ui-panels/src/index.ts"],
+      "@design-mode/ui-panels/*": ["packages/ui-panels/src/*"]
+    }
+  }
+}
