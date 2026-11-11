@@ -1,9 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useStore } from 'zustand';
 import { createDesignStore } from '@design-mode/vector-core';
 import {
   EffectCraftBridge,
   FilmCraftBridge,
+  HttpRelayTransport,
   type HostCommandCall,
 } from '@design-mode/host-bridge';
 import {
@@ -14,12 +15,55 @@ import {
 
 type HostTarget = 'filmcraft' | 'effectcraft';
 
+interface BridgeHealth {
+  filmcraft?: { reachable: boolean; port: number };
+  effectcraft?: { reachable: boolean; port: number };
+}
+
 export const App: React.FC = () => {
   const store = useMemo(() => createDesignStore(), []);
   const state = useStore(store);
 
-  const filmcraftBridge = useMemo(() => new FilmCraftBridge(), []);
-  const effectcraftBridge = useMemo(() => new EffectCraftBridge(), []);
+  const [useLiveBridge, setUseLiveBridge] = useState(false);
+  const [health, setHealth] = useState<BridgeHealth>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const res = await fetch('/health');
+        if (!res.ok) return;
+        const data = (await res.json()) as BridgeHealth;
+        if (!cancelled) {
+          setHealth(data);
+          if (data.effectcraft?.reachable || data.filmcraft?.reachable) {
+            setUseLiveBridge(true);
+          }
+        }
+      } catch {
+        // Bridge server offline — stay in simulated mode
+      }
+    };
+    void probe();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const filmcraftBridge = useMemo(
+    () =>
+      new FilmCraftBridge(
+        useLiveBridge ? new HttpRelayTransport('/rpc/filmcraft') : undefined,
+      ),
+    [useLiveBridge],
+  );
+  const effectcraftBridge = useMemo(
+    () =>
+      new EffectCraftBridge(
+        useLiveBridge ? new HttpRelayTransport('/rpc/effectcraft') : undefined,
+      ),
+    [useLiveBridge],
+  );
 
   const [hostTarget, setHostTarget] = useState<HostTarget>('effectcraft');
   const [playheadSec, setPlayheadSec] = useState(1.5);
@@ -28,28 +72,44 @@ export const App: React.FC = () => {
 
   const activeBridge =
     hostTarget === 'filmcraft' ? filmcraftBridge : effectcraftBridge;
+  const isTargetReachable =
+    hostTarget === 'filmcraft'
+      ? Boolean(health.filmcraft?.reachable)
+      : Boolean(health.effectcraft?.reachable);
 
   const handlePull = async (mode: 'all' | 'selected') => {
-    const [nodes, bgColor, fonts] = await Promise.all([
-      activeBridge.pull(mode),
-      activeBridge.getCompBackgroundColor(),
-      activeBridge.getInstalledFonts(),
-    ]);
-    state.setPulledNodes(nodes, bgColor);
-    setLastCalls(activeBridge.getTransport().getCommandLog());
-    setStatusMsg(
-      `Pulled ${nodes.length} layers from ${activeBridge.hostName} (${fonts.length} fonts)`,
-    );
+    try {
+      const [nodes, bgColor, fonts] = await Promise.all([
+        activeBridge.pull(mode),
+        activeBridge.getCompBackgroundColor(),
+        activeBridge.getInstalledFonts(),
+      ]);
+      state.setPulledNodes(nodes, bgColor);
+      setLastCalls(activeBridge.getTransport().getCommandLog());
+      setStatusMsg(
+        `Pulled ${nodes.length} layers from ${activeBridge.hostName} (${useLiveBridge ? 'LIVE' : 'Simulated'}, ${fonts.length} fonts)`,
+      );
+    } catch (err) {
+      setStatusMsg(
+        `Pull error (${activeBridge.hostName}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   };
 
   const handlePush = async () => {
-    activeBridge.getTransport().clearCommandLog();
-    await activeBridge.push(state.doc.nodes, playheadSec);
-    const log = activeBridge.getTransport().getCommandLog();
-    setLastCalls(log);
-    setStatusMsg(
-      `Pushed ${state.doc.nodes.length} root nodes to ${activeBridge.hostName} @ t=${playheadSec.toFixed(2)}s (${log.length} commands)`,
-    );
+    try {
+      activeBridge.getTransport().clearCommandLog();
+      await activeBridge.push(state.doc.nodes, playheadSec);
+      const log = activeBridge.getTransport().getCommandLog();
+      setLastCalls(log);
+      setStatusMsg(
+        `Pushed ${state.doc.nodes.length} root nodes to ${activeBridge.hostName} (${useLiveBridge ? 'LIVE' : 'Simulated'}) @ t=${playheadSec.toFixed(2)}s (${log.length} commands)`,
+      );
+    } catch (err) {
+      setStatusMsg(
+        `Push error (${activeBridge.hostName}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   };
 
   return (
@@ -100,6 +160,19 @@ export const App: React.FC = () => {
 
         {/* Host Bridge Controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            type="button"
+            className={`dm-btn ${useLiveBridge ? (isTargetReachable ? 'active' : 'warn') : ''}`}
+            onClick={() => setUseLiveBridge((v) => !v)}
+            title="Toggle Live TCP Relay vs Simulated Host"
+          >
+            {useLiveBridge
+              ? isTargetReachable
+                ? 'LIVE TCP'
+                : 'LIVE (Offline)'
+              : 'Simulated'}
+          </button>
+
           <select
             className="dm-select"
             style={{ width: 145 }}

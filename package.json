@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "npm run dev --workspace=@design-mode/studio",
     "build": "npm run build --workspaces --if-present",
+    "bridge": "node packages/bridge-server/src/server.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.base.json"
   },

@@ -43,3 +43,17 @@ npm test
 npm run typecheck
 npm run dev
 ```
+
+## Installing into EffectCraft & FilmCraft
+
+- **EffectCraft (Native Dockable ScriptUI Panel + Live TCP Bridge `:7983`):**
+  Installs [`integrations/effectcraft/Design Mode.jsx`](integrations/effectcraft/Design%20Mode.jsx) directly into `%APPDATA%\EffectCraft\Scripts\ScriptUI Panels\Design Mode.jsx` (accessible via **Window → Design Mode.jsx**).
+- **FilmCraft (Live TCP Control Channel `:7982` + `FILMCRAFT_CONTROL_TOKEN`):**
+  Connects via `@design-mode/bridge-server` (`packages/bridge-server/src/server.mjs`) using UTF-8 without BOM JSON-lines over TCP loopback.
+
+Run the installer and launcher from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-craft-apps.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\launch-design-mode.ps1 -Target both -OpenBrowser
+```
