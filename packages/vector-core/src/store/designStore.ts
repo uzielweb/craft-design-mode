@@ -1,7 +1,11 @@
 import { createStore } from 'zustand/vanilla';
 import type {
+  AlignScope,
+  AlignToMode,
   AxisLock,
   BBoxMode,
+  DesignPreferences,
+  PathfinderResultMode,
   SelectionMode,
   ToolType,
   VectorDocument,
@@ -26,6 +30,9 @@ export interface DesignState {
   selectedNodeIds: string[];
   selectedPathIds: string[];
   selectedPointIds: string[];
+  keyObjectId: string | null;
+  alignToMode: AlignToMode;
+  alignScope: AlignScope;
   selectionMode: SelectionMode;
   bboxMode: BBoxMode;
   isolationStack: string[];
@@ -33,7 +40,17 @@ export interface DesignState {
   lockAxis: AxisLock;
   outlineView: boolean;
   transparencyGrid: boolean;
+  snapping: boolean;
+  showBounds: boolean;
+  showPixelGrid: boolean;
+  showRulers: boolean;
+  pathfinderMode: PathfinderResultMode;
+  distributeGap: number | null;
   viewport: ViewportState;
+  customPivot: { x: number; y: number } | null;
+  preferences: DesignPreferences;
+  cachedFonts: string[];
+  collapsedNodeIds: string[];
   lastAction: LastActionSnapshot | null;
   canUndo: boolean;
   canRedo: boolean;
@@ -41,10 +58,11 @@ export interface DesignState {
 
   // Actions
   setDocument: (doc: VectorDocument) => void;
-  setPulledNodes: (nodes: VectorNode[], backgroundColor?: string) => void;
+  setPulledNodes: (nodes: VectorNode[], backgroundColor?: string, replaceAll?: boolean) => void;
   executeCommand: (cmd: ICommand) => void;
   undo: () => void;
   redo: () => void;
+  resetLastAction: () => void;
   updateLastAction: (params: Record<string, unknown>) => void;
   bumpRevision: () => void;
 
@@ -56,7 +74,21 @@ export interface DesignState {
   setLockAxis: (axis: AxisLock) => void;
   toggleOutlineView: () => void;
   toggleTransparencyGrid: () => void;
+  toggleSnapping: () => void;
+  toggleShowBounds: () => void;
+  toggleShowPixelGrid: () => void;
+  toggleShowRulers: () => void;
+  setPathfinderMode: (mode: PathfinderResultMode) => void;
+  setDistributeGap: (gap: number | null) => void;
   setViewport: (next: Partial<ViewportState>) => void;
+  setCustomPivot: (pt: { x: number; y: number } | null) => void;
+  setKeyObject: (id: string | null) => void;
+  setAlignToMode: (mode: AlignToMode) => void;
+  setAlignScope: (scope: AlignScope) => void;
+  updatePreferences: (partial: Partial<DesignPreferences>) => void;
+  setCachedFonts: (fonts: string[]) => void;
+  toggleNodeCollapsed: (id: string) => void;
+  setAllCollapsed: (collapsed: boolean) => void;
 
   selectNodes: (nodeIds: string[], additive?: boolean) => void;
   selectPath: (pathId: string, ownerNodeId?: string) => void;
@@ -81,12 +113,23 @@ export function createDesignStore(initialDoc?: VectorDocument) {
       }));
     };
 
+    const autoExpandForIds = (nodeIds: string[], prevCollapsed: string[]) => {
+      if (!get().preferences.autoExpandSelected || prevCollapsed.length === 0) {
+        return prevCollapsed;
+      }
+      const removeSet = new Set(nodeIds);
+      return prevCollapsed.filter((id) => !removeSet.has(id));
+    };
+
     return {
       doc: initialDoc ?? createDemoDocument(),
       revision: 0,
       selectedNodeIds: ['layer_shield'],
       selectedPathIds: ['path_shield'],
       selectedPointIds: [],
+      keyObjectId: null,
+      alignToMode: 'selection',
+      alignScope: 'individual',
       selectionMode: 'layer',
       bboxMode: 'individual_object',
       isolationStack: [],
@@ -94,7 +137,23 @@ export function createDesignStore(initialDoc?: VectorDocument) {
       lockAxis: null,
       outlineView: false,
       transparencyGrid: false,
+      snapping: true,
+      showBounds: true,
+      showPixelGrid: false,
+      showRulers: true,
+      pathfinderMode: 'destructive',
+      distributeGap: null,
       viewport: { zoom: 0.72, panX: 40, panY: 30 },
+      customPivot: null,
+      preferences: {
+        shortcutPreset: 'illustrator',
+        uiScale: 1,
+        toolbarCompact: false,
+        autoExpandSelected: true,
+        matchCompBackground: true,
+      },
+      cachedFonts: ['Inter', 'Roboto', 'Space Grotesk', 'JetBrains Mono', 'Montserrat'],
+      collapsedNodeIds: [],
       lastAction: null,
       canUndo: false,
       canRedo: false,
@@ -108,6 +167,7 @@ export function createDesignStore(initialDoc?: VectorDocument) {
           selectedNodeIds: [],
           selectedPathIds: [],
           selectedPointIds: [],
+          keyObjectId: null,
           isolationStack: [],
           lastAction: null,
           canUndo: false,
@@ -115,18 +175,19 @@ export function createDesignStore(initialDoc?: VectorDocument) {
         });
       },
 
-      setPulledNodes: (nodes, backgroundColor) => {
+      setPulledNodes: (nodes, backgroundColor, replaceAll = true) => {
         commandManager.clear();
         set((s) => ({
           doc: {
             ...s.doc,
-            nodes,
+            nodes: replaceAll ? nodes : [...s.doc.nodes, ...nodes],
             backgroundColor: backgroundColor ?? s.doc.backgroundColor,
           },
           revision: s.revision + 1,
           selectedNodeIds: nodes[0] ? [nodes[0].id] : [],
           selectedPathIds: [],
           selectedPointIds: [],
+          keyObjectId: null,
           isolationStack: [],
           lastAction: null,
           canUndo: false,
@@ -145,6 +206,10 @@ export function createDesignStore(initialDoc?: VectorDocument) {
 
       redo: () => {
         if (commandManager.redo()) syncHistory();
+      },
+
+      resetLastAction: () => {
+        if (commandManager.undo()) syncHistory();
       },
 
       updateLastAction: (params) => {
@@ -166,8 +231,42 @@ export function createDesignStore(initialDoc?: VectorDocument) {
       toggleOutlineView: () => set((s) => ({ outlineView: !s.outlineView })),
       toggleTransparencyGrid: () =>
         set((s) => ({ transparencyGrid: !s.transparencyGrid })),
+      toggleSnapping: () => set((s) => ({ snapping: !s.snapping })),
+      toggleShowBounds: () => set((s) => ({ showBounds: !s.showBounds })),
+      toggleShowPixelGrid: () => set((s) => ({ showPixelGrid: !s.showPixelGrid })),
+      toggleShowRulers: () => set((s) => ({ showRulers: !s.showRulers })),
+      setPathfinderMode: (pathfinderMode) => set({ pathfinderMode }),
+      setDistributeGap: (distributeGap) => set({ distributeGap }),
       setViewport: (next) =>
         set((s) => ({ viewport: { ...s.viewport, ...next } })),
+      setCustomPivot: (customPivot) => set({ customPivot }),
+      setKeyObject: (keyObjectId) => set({ keyObjectId }),
+      setAlignToMode: (alignToMode) => set({ alignToMode }),
+      setAlignScope: (alignScope) => set({ alignScope }),
+      updatePreferences: (partial) =>
+        set((s) => ({ preferences: { ...s.preferences, ...partial } })),
+      setCachedFonts: (cachedFonts) => set({ cachedFonts }),
+      toggleNodeCollapsed: (id) =>
+        set((s) => ({
+          collapsedNodeIds: s.collapsedNodeIds.includes(id)
+            ? s.collapsedNodeIds.filter((c) => c !== id)
+            : [...s.collapsedNodeIds, id],
+        })),
+      setAllCollapsed: (collapsed) =>
+        set((s) => {
+          if (!collapsed) return { collapsedNodeIds: [] };
+          const ids: string[] = [];
+          const walk = (list: VectorNode[]) => {
+            for (const n of list) {
+              if ((n.children && n.children.length > 0) || (n.paths && n.paths.length > 0)) {
+                ids.push(n.id);
+              }
+              if (n.children) walk(n.children);
+            }
+          };
+          walk(s.doc.nodes);
+          return { collapsedNodeIds: ids };
+        }),
 
       selectNodes: (nodeIds, additive = false) =>
         set((s) => {
@@ -178,6 +277,11 @@ export function createDesignStore(initialDoc?: VectorDocument) {
             selectedNodeIds: nextIds,
             selectedPathIds: [],
             selectedPointIds: [],
+            keyObjectId:
+              s.keyObjectId && nextIds.includes(s.keyObjectId)
+                ? s.keyObjectId
+                : null,
+            collapsedNodeIds: autoExpandForIds(nextIds, s.collapsedNodeIds),
           };
         }),
 
@@ -185,10 +289,12 @@ export function createDesignStore(initialDoc?: VectorDocument) {
         set((s) => {
           const resolvedOwner =
             ownerNodeId ?? findPathLookup(s.doc.nodes, pathId)?.ownerNode.id;
+          const nextNodeIds = resolvedOwner ? [resolvedOwner] : s.selectedNodeIds;
           return {
             selectedPathIds: [pathId],
-            selectedNodeIds: resolvedOwner ? [resolvedOwner] : s.selectedNodeIds,
+            selectedNodeIds: nextNodeIds,
             selectedPointIds: [],
+            collapsedNodeIds: autoExpandForIds(nextNodeIds, s.collapsedNodeIds),
           };
         }),
 
@@ -204,6 +310,7 @@ export function createDesignStore(initialDoc?: VectorDocument) {
           selectedNodeIds: [],
           selectedPathIds: [],
           selectedPointIds: [],
+          keyObjectId: null,
         }),
 
       enterIsolation: (nodeId) =>

@@ -1,20 +1,37 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AlignNodesCommand,
   applyAxisLock,
   applyHandleLengthDelta,
+  applyRotoBezier,
   applySlideDrag,
   beginSlideDrag,
+  booleanPolygons,
   buildParametricEllipseContours,
+  buildParametricRectPoints,
+  buildParametricStarPoints,
+  collectDocumentColorUsages,
   CommandManager,
   computeBoundingBoxes,
+  createDefaultTransform,
   createDemoDocument,
   createNumericInputState,
+  DistributeNodesCommand,
+  expandCornerRadius,
+  findNodeById,
   findPathLookup,
   getPointHandles,
   hitTestDocument,
+  offsetPolygon,
+  PathfinderCommand,
+  ReplaceColorCommand,
   RoundCornerCommand,
+  SlidePointCommand,
+  SplitPathCommand,
   stepNumericInputMachine,
+  trimPolyline,
   type BezierPoint,
+  type VectorNode,
 } from '../index.js';
 
 describe('CommandManager & Last Action', () => {
@@ -204,8 +221,147 @@ describe('Bezier Math: Axis Lock, Ctrl+Slide, Relative Offset, Parametric Ellips
       ry: 100,
       holeRatio: 0.4,
       sweep: 180,
+      startAngle: 0,
     });
     expect(arc).toHaveLength(1);
     expect(arc[0]!.length).toBeGreaterThan(4);
+    expect(arc[0]![0]!.x).toBeCloseTo(100, 1);
+  });
+});
+
+describe('Pathfinder Booleans, Colors, Align/Distribute & Operators', () => {
+  it('computes boolean unite, subtract, intersect, and exclude polygons', () => {
+    const sqA = [
+      { x: 0, y: 0 },
+      { x: 100, y: 0 },
+      { x: 100, y: 100 },
+      { x: 0, y: 100 },
+    ];
+    const sqB = [
+      { x: 50, y: 0 },
+      { x: 150, y: 0 },
+      { x: 150, y: 100 },
+      { x: 50, y: 100 },
+    ];
+
+    expect(booleanPolygons(sqA, sqB, 'unite').length).toBeGreaterThanOrEqual(1);
+    expect(booleanPolygons(sqA, sqB, 'subtract').length).toBeGreaterThanOrEqual(1);
+    expect(booleanPolygons(sqA, sqB, 'intersect').length).toBeGreaterThanOrEqual(1);
+    expect(booleanPolygons(sqA, sqB, 'exclude').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('supports Pathfinder Destructive vs Operator (non-destructive) modes', () => {
+    const doc = createDemoDocument();
+    const cm = new CommandManager();
+    const cmdOp = new PathfinderCommand(
+      () => doc,
+      'layer_badge',
+      'layer_shield',
+      'unite',
+      undefined,
+      'operator',
+    );
+    cm.execute(cmdOp);
+    const createdOp = doc.nodes.find((n) => n.name.includes('Merge (unite)'));
+    expect(createdOp?.operators?.[0]?.type).toBe('merge_paths');
+    expect(createdOp?.children).toHaveLength(2);
+    cm.undo();
+    expect(findNodeById(doc.nodes, 'layer_badge')).not.toBeNull();
+  });
+
+  it('collects document colors sorted by count and replaces colors globally', () => {
+    const doc = createDemoDocument();
+    const usages = collectDocumentColorUsages(doc.nodes);
+    expect(usages.length).toBeGreaterThan(0);
+    const first = usages[0]!;
+    const cm = new CommandManager();
+    cm.execute(new ReplaceColorCommand(() => doc, first.color, { toColor: '#123456' }));
+    const after = collectDocumentColorUsages(doc.nodes);
+    expect(after.some((u) => u.color === '#123456')).toBe(true);
+  });
+
+  it('aligns to Key Object and As Set, and distributes with fixed spacing', () => {
+    const mkBox = (id: string, x: number): VectorNode => ({
+      id,
+      name: id,
+      type: 'layer',
+      visible: true,
+      locked: false,
+      hasKeyframes: false,
+      transform: createDefaultTransform({ x, y: 100 }),
+      paths: [
+        {
+          id: `${id}_p`,
+          type: 'parametric_rect',
+          closed: true,
+          points: [],
+          parametricData: { cx: 0, cy: 0, width: 40, height: 40 },
+        },
+      ],
+    });
+    const doc = {
+      ...createDemoDocument(),
+      nodes: [mkBox('b1', 100), mkBox('b2', 200), mkBox('b3', 350)],
+    };
+    const cm = new CommandManager();
+    cm.execute(
+      new AlignNodesCommand(() => doc, ['b1', 'b2', 'b3'], 'left', {
+        alignTo: 'key_object',
+        keyObjectId: 'b2',
+      }),
+    );
+    expect(doc.nodes[0]!.transform.x).toBeCloseTo(200, 1);
+
+    cm.execute(
+      new DistributeNodesCommand(() => doc, ['b1', 'b2', 'b3'], 'space_h', 20),
+    );
+    const xs = doc.nodes.map((n) => n.transform.x).sort((a, b) => a - b);
+    expect(xs[1]! - xs[0]!).toBeCloseTo(60, 1); // 40 width + 20 fixed gap
+  });
+
+  it('handles SlidePointCommand, SplitPathCommand (Scissors), RotoBezier, Squircle & Operators', () => {
+    const doc = createDemoDocument();
+    const cm = new CommandManager();
+    cm.execute(new SlidePointCommand(() => doc, 'path_shield', ['pt_top'], { slideFactor: 0.25 }));
+    expect(findPathLookup(doc.nodes, 'path_shield')!.path.points[0]!.x).not.toBe(0);
+
+    cm.execute(new SplitPathCommand(() => doc, 'path_shield', { x: 0, y: -120 }));
+    expect(findPathLookup(doc.nodes, 'path_shield')!.path.closed).toBe(false);
+
+    const rectPts = buildParametricRectPoints({ width: 100, height: 80, roundness: 16 });
+    expect(rectPts).toHaveLength(4);
+    const squircle = expandCornerRadius(
+      rectPts.map((p) => ({ ...p, cornerSmoothness: 80 })),
+      true,
+    );
+    expect(squircle.length).toBeGreaterThan(4);
+
+    const starPts = buildParametricStarPoints({ pointsCount: 5, outerRadius: 80, innerRadius: 40 });
+    expect(starPts).toHaveLength(10);
+
+    const roto = applyRotoBezier(starPts.slice(0, 4), true);
+    expect(roto[0]!.inLength).toBeGreaterThan(0);
+
+    const trimmed = trimPolyline(
+      [
+        { x: 0, y: 0 },
+        { x: 100, y: 0 },
+      ],
+      25,
+      75,
+    );
+    expect(trimmed[0]!.x).toBeCloseTo(25, 1);
+    expect(trimmed[trimmed.length - 1]!.x).toBeCloseTo(75, 1);
+
+    const offsetted = offsetPolygon(
+      [
+        { x: -10, y: -10 },
+        { x: 10, y: -10 },
+        { x: 10, y: 10 },
+        { x: -10, y: 10 },
+      ],
+      5,
+    );
+    expect(Math.abs(offsetted[0]!.x)).toBeCloseTo(15, 1);
   });
 });

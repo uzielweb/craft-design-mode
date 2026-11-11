@@ -216,6 +216,16 @@ export class FilmCraftBridge implements IHostBridge {
       });
     }
 
+    if (node.type === 'text') {
+      await this.transport.execute('graphics.newText', {
+        name: node.name,
+        text: node.textContent ?? 'Text',
+        fontFamily: node.fontFamily ?? 'Inter',
+        fontSize: node.fontSize ?? 48,
+        position: [node.transform.x, node.transform.y],
+      });
+    }
+
     if (node.paths) {
       for (const path of node.paths) {
         if (path.type === 'parametric_ellipse') {
@@ -225,6 +235,15 @@ export class FilmCraftBridge implements IHostBridge {
               (path.parametricData?.rx ?? 100) * 2,
               (path.parametricData?.ry ?? 100) * 2,
             ],
+          });
+        } else if (path.type === 'parametric_rect') {
+          await this.transport.execute('graphics.newRectangle', {
+            position: [node.transform.x, node.transform.y],
+            size: [
+              path.parametricData?.width ?? 160,
+              path.parametricData?.height ?? 120,
+            ],
+            roundness: path.parametricData?.roundness ?? 0,
           });
         } else {
           await this.transport.execute('graphics.newShape', {

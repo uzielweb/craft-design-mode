@@ -1,5 +1,6 @@
 import {
   createDefaultTransform,
+  getEffectiveContours,
   getPointHandles,
   type VectorNode,
   type VectorPath,
@@ -209,6 +210,26 @@ export class EffectCraftBridge implements IHostBridge {
       });
     }
 
+    if (node.type === 'text') {
+      await this.transport.execute('layer.newText', {
+        name: node.name,
+        text: node.textContent ?? 'Text',
+        fontFamily: node.fontFamily ?? 'Inter',
+        fontStyle: node.fontStyle ?? 'Medium',
+        fontSize: node.fontSize ?? 48,
+        tracking: node.tracking ?? 0,
+        baselineShift: node.baselineShift ?? 0,
+        position: posVal,
+      });
+    }
+
+    if (node.blendMode && node.blendMode !== 'normal') {
+      await this.transport.execute('layer.setBlendMode', {
+        layer: node.name,
+        blendMode: node.blendMode,
+      });
+    }
+
     if (node.style?.fill || node.style?.stroke) {
       await this.transport.execute('shape.fillStroke', {
         layers: [node.name],
@@ -217,6 +238,8 @@ export class EffectCraftBridge implements IHostBridge {
           node.style.fill !== undefined ? node.style.fill.opacity * 100 : undefined,
         stroke: node.style.stroke?.color ?? false,
         strokeWidth: node.style.stroke?.width ?? 0,
+        lineCap: node.style.stroke?.lineCap,
+        lineJoin: node.style.stroke?.lineJoin,
       });
       if (
         node.style.stroke?.taperStart !== undefined ||
@@ -233,7 +256,33 @@ export class EffectCraftBridge implements IHostBridge {
 
     if (node.paths) {
       for (const path of node.paths) {
-        if (path.type === 'parametric_ellipse') {
+        if (path.type === 'parametric_rect') {
+          await this.transport.execute('shape.newShape', {
+            layer: node.name,
+            kind: 'rect',
+            size: [
+              path.parametricData?.width ?? 160,
+              path.parametricData?.height ?? 120,
+            ],
+            roundness: path.parametricData?.roundness ?? 0,
+            position: [node.transform.x, node.transform.y],
+          });
+        } else if (path.type === 'parametric_star') {
+          await this.transport.execute('shape.newShape', {
+            layer: node.name,
+            kind: path.parametricData?.isPolygon ? 'polygon' : 'star',
+            points: path.parametricData?.pointsCount ?? 5,
+            outerRadius: path.parametricData?.outerRadius ?? 100,
+            innerRadius: path.parametricData?.innerRadius ?? 45,
+            roundness: path.parametricData?.roundness ?? 0,
+            position: [node.transform.x, node.transform.y],
+          });
+        } else if (
+          path.type === 'parametric_ellipse' &&
+          (path.parametricData?.holeRatio ?? 0) <= 0.001 &&
+          (path.parametricData?.sweep ?? 360) >= 359.99 &&
+          (path.parametricData?.startAngle ?? -90) === -90
+        ) {
           await this.transport.execute('shape.newShape', {
             layer: node.name,
             kind: 'ellipse',
@@ -244,21 +293,61 @@ export class EffectCraftBridge implements IHostBridge {
             position: [node.transform.x, node.transform.y],
           });
         } else {
-          const vertices: Array<[number, number]> = [];
-          const inTangents: Array<[number, number]> = [];
-          const outTangents: Array<[number, number]> = [];
-          for (const pt of path.points) {
-            const h = getPointHandles(pt);
-            vertices.push([pt.x, pt.y]);
-            inTangents.push([h.inHandle.x - pt.x, h.inHandle.y - pt.y]);
-            outTangents.push([h.outHandle.x - pt.x, h.outHandle.y - pt.y]);
+          const { contours, closed } = getEffectiveContours(path);
+          for (const contour of contours) {
+            const vertices: Array<[number, number]> = [];
+            const inTangents: Array<[number, number]> = [];
+            const outTangents: Array<[number, number]> = [];
+            for (const pt of contour) {
+              const h = getPointHandles(pt);
+              vertices.push([pt.x, pt.y]);
+              inTangents.push([h.inHandle.x - pt.x, h.inHandle.y - pt.y]);
+              outTangents.push([h.outHandle.x - pt.x, h.outHandle.y - pt.y]);
+            }
+            await this.transport.execute('shape.newPath', {
+              layer: node.name,
+              vertices,
+              inTangents,
+              outTangents,
+              closed,
+              rotoBezier: Boolean(path.rotoBezier),
+            });
           }
-          await this.transport.execute('shape.newPath', {
+        }
+      }
+    }
+
+    if (node.operators) {
+      for (const op of node.operators) {
+        if (!op.enabled) continue;
+        if (op.type === 'trim_paths') {
+          await this.transport.execute('layer.addShapeItem', {
             layer: node.name,
-            vertices,
-            inTangents,
-            outTangents,
-            closed: path.closed,
+            kind: 'trim',
+            start: op.start,
+            end: op.end,
+            offset: op.offset,
+          });
+        } else if (op.type === 'repeater') {
+          await this.transport.execute('layer.addShapeItem', {
+            layer: node.name,
+            kind: 'repeater',
+            copies: op.copies,
+            offset: [op.offsetX, op.offsetY],
+            rotation: op.rotation,
+            scale: op.scale * 100,
+          });
+        } else if (op.type === 'offset_paths') {
+          await this.transport.execute('layer.addShapeItem', {
+            layer: node.name,
+            kind: 'offset',
+            amount: op.amount,
+          });
+        } else if (op.type === 'merge_paths') {
+          await this.transport.execute('layer.addShapeItem', {
+            layer: node.name,
+            kind: 'merge',
+            mode: op.op,
           });
         }
       }

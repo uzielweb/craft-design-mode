@@ -100,6 +100,23 @@ function collectPaintPaths(
           worldMatrix,
         });
       }
+    } else if (allowedByIsolation && node.type === 'text') {
+      const approxW = Math.max(80, (node.textContent?.length ?? 6) * (node.fontSize ?? 48) * 0.55);
+      const approxH = (node.fontSize ?? 48) * 1.1;
+      entries.push({
+        path: {
+          id: `${node.id}_text_box`,
+          name: node.name,
+          type: 'parametric_rect',
+          closed: true,
+          points: [],
+          parametricData: { cx: 0, cy: 0, width: approxW, height: approxH },
+        },
+        ownerNode: node,
+        parentGroup: activeGroup,
+        rootLayer,
+        worldMatrix,
+      });
     }
 
     if (node.children) {

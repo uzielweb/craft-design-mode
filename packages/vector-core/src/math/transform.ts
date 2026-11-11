@@ -34,11 +34,38 @@ export function composeTransformMatrix(t: NodeTransform): Mat2D {
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
 
-  // T(x, y) * R(rot) * S(sx, sy) * T(-anchorX, -anchorY)
-  const a = cos * t.scaleX;
-  const b = sin * t.scaleX;
-  const c = -sin * t.scaleY;
-  const d = cos * t.scaleY;
+  const skewDeg = t.skew ?? 0;
+  const skewAxisDeg = t.skewAxis ?? 0;
+  let a = cos * t.scaleX;
+  let b = sin * t.scaleX;
+  let c = -sin * t.scaleY;
+  let d = cos * t.scaleY;
+
+  if (Math.abs(skewDeg) > 1e-4) {
+    const tanSkew = Math.tan((Math.max(-85, Math.min(85, skewDeg)) * Math.PI) / 180);
+    const axisRad = (skewAxisDeg * Math.PI) / 180;
+    const cosA = Math.cos(axisRad);
+    const sinA = Math.sin(axisRad);
+    // R(-axis) * SkewX(tanSkew) * R(axis)
+    const skewMat: Mat2D = [
+      1 - tanSkew * sinA * cosA,
+      tanSkew * cosA * cosA,
+      -tanSkew * sinA * sinA,
+      1 + tanSkew * sinA * cosA,
+      0,
+      0,
+    ];
+    // Post-multiply rotation+scale by skewMat
+    const na = a * skewMat[0] + c * skewMat[1];
+    const nb = b * skewMat[0] + d * skewMat[1];
+    const nc = a * skewMat[2] + c * skewMat[3];
+    const nd = b * skewMat[2] + d * skewMat[3];
+    a = na;
+    b = nb;
+    c = nc;
+    d = nd;
+  }
+
   const tx = t.x - (a * t.anchorX + c * t.anchorY);
   const ty = t.y - (b * t.anchorX + d * t.anchorY);
 

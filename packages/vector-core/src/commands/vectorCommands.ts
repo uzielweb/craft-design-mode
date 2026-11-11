@@ -1,8 +1,13 @@
 import type {
+  AlignScope,
+  AlignToMode,
   BezierPoint,
   HandleMode,
+  MergePathsOperator,
   NodeTransform,
   ParametricData,
+  PathfinderResultMode,
+  ShapeOperator,
   VectorDocument,
   VectorNode,
   VectorStyle,
@@ -19,9 +24,21 @@ import {
 } from '../ast/utils.js';
 import {
   applyHandleLengthDelta,
+  getEffectiveContours,
   setPointHandleMode,
+  slidePointByFactor,
+  splitPathAtPosition,
+  type Vec2,
 } from '../math/bezier.js';
-import { computeBoundingBoxes } from '../math/transform.js';
+import {
+  runPathfinderOnPaths,
+  type PathfinderOp,
+} from '../math/pathfinder.js';
+import {
+  applyMatrix,
+  computeBoundingBoxes,
+  getWorldMatrixForNode,
+} from '../math/transform.js';
 import type { CommandParamSchema, ICommand } from './ICommand.js';
 
 export type DocAccessor = () => VectorDocument;
@@ -201,27 +218,28 @@ export class SetTransformPropsCommand implements ICommand<Partial<NodeTransform>
   }
 }
 
-export class RoundCornerCommand implements ICommand<{ cornerRadius: number }> {
+export class RoundCornerCommand implements ICommand<{ cornerRadius: number; cornerSmoothness?: number }> {
   readonly id = 'path.roundCorner';
-  readonly label = 'Round Corner';
+  readonly label = 'Round Corners';
   readonly schema: CommandParamSchema[] = [
-    { key: 'cornerRadius', label: 'Corner Radius', type: 'number', min: 0, max: 300, step: 1 },
+    { key: 'cornerRadius', label: 'Radius', type: 'number', min: 0, max: 300, step: 0.5 },
+    { key: 'cornerSmoothness', label: 'Smoothness (%)', type: 'number', min: 0, max: 100, step: 1 },
   ];
 
-  private snapshots = new Map<string, Map<string, number | undefined>>();
+  private snapshots = new Map<string, Map<string, { r?: number; s?: number }>>();
 
   constructor(
     private getDoc: DocAccessor,
     private pathId: string,
     private pointIds: string[] | null,
-    private params: { cornerRadius: number },
+    private params: { cornerRadius: number; cornerSmoothness?: number },
   ) {
     const path = findPathLookup(this.getDoc().nodes, pathId)?.path;
     if (path) {
-      const map = new Map<string, number | undefined>();
+      const map = new Map<string, { r?: number; s?: number }>();
       for (const pt of path.points) {
         if (!pointIds || pointIds.includes(pt.id)) {
-          map.set(pt.id, pt.cornerRadius);
+          map.set(pt.id, { r: pt.cornerRadius, s: pt.cornerSmoothness });
         }
       }
       this.snapshots.set(pathId, map);
@@ -235,6 +253,9 @@ export class RoundCornerCommand implements ICommand<{ cornerRadius: number }> {
     for (const pt of path.points) {
       if (snap.has(pt.id)) {
         pt.cornerRadius = Math.max(0, this.params.cornerRadius);
+        if (this.params.cornerSmoothness !== undefined) {
+          pt.cornerSmoothness = Math.max(0, Math.min(100, this.params.cornerSmoothness));
+        }
       }
     }
   }
@@ -244,8 +265,10 @@ export class RoundCornerCommand implements ICommand<{ cornerRadius: number }> {
     const snap = this.snapshots.get(this.pathId);
     if (!path || !snap) return;
     for (const pt of path.points) {
-      if (snap.has(pt.id)) {
-        pt.cornerRadius = snap.get(pt.id);
+      const prev = snap.get(pt.id);
+      if (prev) {
+        pt.cornerRadius = prev.r;
+        pt.cornerSmoothness = prev.s;
       }
     }
   }
@@ -254,9 +277,12 @@ export class RoundCornerCommand implements ICommand<{ cornerRadius: number }> {
     return { ...this.params };
   }
 
-  updateParams(next: Partial<{ cornerRadius: number }>): void {
+  updateParams(next: Partial<{ cornerRadius: number; cornerSmoothness?: number }>): void {
     if (typeof next.cornerRadius === 'number' && Number.isFinite(next.cornerRadius)) {
       this.params.cornerRadius = Math.max(0, next.cornerRadius);
+    }
+    if (typeof next.cornerSmoothness === 'number' && Number.isFinite(next.cornerSmoothness)) {
+      this.params.cornerSmoothness = Math.max(0, Math.min(100, next.cornerSmoothness));
     }
   }
 }
@@ -638,6 +664,12 @@ export class SplitNodePathsCommand implements ICommand<{ nodeId: string }> {
 
 export type AlignTarget = 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom';
 
+export interface AlignOptions {
+  alignTo?: AlignToMode;
+  scope?: AlignScope;
+  keyObjectId?: string | null;
+}
+
 export class AlignNodesCommand implements ICommand<{ alignment: AlignTarget }> {
   readonly id = 'transform.align';
   readonly label = 'Align Selection';
@@ -647,6 +679,7 @@ export class AlignNodesCommand implements ICommand<{ alignment: AlignTarget }> {
     private getDoc: DocAccessor,
     private nodeIds: string[],
     private alignment: AlignTarget,
+    private options: AlignOptions = {},
   ) {
     const doc = this.getDoc();
     for (const id of nodeIds) {
@@ -660,25 +693,86 @@ export class AlignNodesCommand implements ICommand<{ alignment: AlignTarget }> {
     const boxes = computeBoundingBoxes(doc.nodes, this.nodeIds, 'individual_comp');
     if (boxes.length === 0) return;
 
-    const targetBounds =
-      boxes.length === 1
-        ? { minX: 0, minY: 0, maxX: doc.width, maxY: doc.height, cx: doc.width / 2, cy: doc.height / 2 }
-        : {
-            minX: Math.min(...boxes.map((b) => b.minX)),
-            minY: Math.min(...boxes.map((b) => b.minY)),
-            maxX: Math.max(...boxes.map((b) => b.maxX)),
-            maxY: Math.max(...boxes.map((b) => b.maxY)),
-            cx:
-              (Math.min(...boxes.map((b) => b.minX)) +
-                Math.max(...boxes.map((b) => b.maxX))) /
-              2,
-            cy:
-              (Math.min(...boxes.map((b) => b.minY)) +
-                Math.max(...boxes.map((b) => b.maxY))) /
-              2,
-          };
+    const alignTo: AlignToMode =
+      this.options.alignTo ?? (boxes.length === 1 ? 'composition' : 'selection');
+    const scope: AlignScope = this.options.scope ?? 'individual';
+
+    let targetBounds: {
+      minX: number;
+      minY: number;
+      maxX: number;
+      maxY: number;
+      cx: number;
+      cy: number;
+    };
+
+    const keyBox =
+      alignTo === 'key_object' && this.options.keyObjectId
+        ? boxes.find((b) => b.id === this.options.keyObjectId)
+        : undefined;
+
+    if (keyBox) {
+      targetBounds = {
+        minX: keyBox.minX,
+        minY: keyBox.minY,
+        maxX: keyBox.maxX,
+        maxY: keyBox.maxY,
+        cx: keyBox.center.x,
+        cy: keyBox.center.y,
+      };
+    } else if (alignTo === 'composition' || boxes.length === 1) {
+      targetBounds = {
+        minX: 0,
+        minY: 0,
+        maxX: doc.width,
+        maxY: doc.height,
+        cx: doc.width / 2,
+        cy: doc.height / 2,
+      };
+    } else {
+      const minX = Math.min(...boxes.map((b) => b.minX));
+      const minY = Math.min(...boxes.map((b) => b.minY));
+      const maxX = Math.max(...boxes.map((b) => b.maxX));
+      const maxY = Math.max(...boxes.map((b) => b.maxY));
+      targetBounds = {
+        minX,
+        minY,
+        maxX,
+        maxY,
+        cx: (minX + maxX) / 2,
+        cy: (minY + maxY) / 2,
+      };
+    }
+
+    if (scope === 'set') {
+      const unionMinX = Math.min(...boxes.map((b) => b.minX));
+      const unionMinY = Math.min(...boxes.map((b) => b.minY));
+      const unionMaxX = Math.max(...boxes.map((b) => b.maxX));
+      const unionMaxY = Math.max(...boxes.map((b) => b.maxY));
+      const unionCx = (unionMinX + unionMaxX) / 2;
+      const unionCy = (unionMinY + unionMaxY) / 2;
+
+      let dx = 0;
+      let dy = 0;
+      if (this.alignment === 'left') dx = targetBounds.minX - unionMinX;
+      else if (this.alignment === 'hcenter') dx = targetBounds.cx - unionCx;
+      else if (this.alignment === 'right') dx = targetBounds.maxX - unionMaxX;
+      else if (this.alignment === 'top') dy = targetBounds.minY - unionMinY;
+      else if (this.alignment === 'vcenter') dy = targetBounds.cy - unionCy;
+      else if (this.alignment === 'bottom') dy = targetBounds.maxY - unionMaxY;
+
+      for (const id of this.nodeIds) {
+        const node = findNodeById(doc.nodes, id);
+        if (node) {
+          node.transform.x += dx;
+          node.transform.y += dy;
+        }
+      }
+      return;
+    }
 
     for (const box of boxes) {
+      if (keyBox && box.id === keyBox.id) continue;
       const node = findNodeById(doc.nodes, box.id);
       if (!node) continue;
       let dx = 0;
@@ -721,6 +815,501 @@ export class AlignNodesCommand implements ICommand<{ alignment: AlignTarget }> {
 
   getParams() {
     return { alignment: this.alignment };
+  }
+}
+
+export type DistributeMode =
+  | 'horizontal'
+  | 'vertical'
+  | 'space_h'
+  | 'space_v'
+  | 'top'
+  | 'vcenter'
+  | 'bottom'
+  | 'left'
+  | 'hcenter'
+  | 'right';
+
+export class DistributeNodesCommand implements ICommand<{ mode: DistributeMode; fixedGap?: number }> {
+  readonly id = 'transform.distribute';
+  readonly label = 'Distribute Selection';
+  private snapshots = new Map<string, { x: number; y: number }>();
+
+  constructor(
+    private getDoc: DocAccessor,
+    private nodeIds: string[],
+    private mode: DistributeMode,
+    private fixedGap?: number,
+  ) {
+    const doc = this.getDoc();
+    for (const id of nodeIds) {
+      const n = findNodeById(doc.nodes, id);
+      if (n) this.snapshots.set(id, { x: n.transform.x, y: n.transform.y });
+    }
+  }
+
+  execute(): void {
+    const doc = this.getDoc();
+    const boxes = computeBoundingBoxes(doc.nodes, this.nodeIds, 'individual_comp');
+    if (boxes.length < 3 && this.fixedGap === undefined) return;
+    if (boxes.length < 2) return;
+
+    const isHoriz =
+      this.mode === 'horizontal' ||
+      this.mode === 'space_h' ||
+      this.mode === 'left' ||
+      this.mode === 'hcenter' ||
+      this.mode === 'right';
+
+    const getRef = (b: (typeof boxes)[number]): number => {
+      switch (this.mode) {
+        case 'left':
+          return b.minX;
+        case 'right':
+          return b.maxX;
+        case 'top':
+          return b.minY;
+        case 'bottom':
+          return b.maxY;
+        case 'vcenter':
+        case 'vertical':
+          return b.center.y;
+        default:
+          return b.center.x;
+      }
+    };
+
+    const sorted = [...boxes].sort((a, b) =>
+      isHoriz ? a.center.x - b.center.x : a.center.y - b.center.y,
+    );
+
+    if (
+      this.mode !== 'space_h' &&
+      this.mode !== 'space_v' &&
+      this.fixedGap === undefined
+    ) {
+      const firstVal = getRef(sorted[0]!);
+      const lastVal = getRef(sorted[sorted.length - 1]!);
+      const step = (lastVal - firstVal) / (sorted.length - 1);
+      for (let i = 1; i < sorted.length - 1; i++) {
+        const b = sorted[i]!;
+        const node = findNodeById(doc.nodes, b.id);
+        if (!node) continue;
+        const delta = firstVal + step * i - getRef(b);
+        if (isHoriz) node.transform.x += delta;
+        else node.transform.y += delta;
+      }
+      return;
+    }
+
+    // Equal spacing (either 'Even' gap between edges, or explicit fixedGap in px)
+    const minEdge = isHoriz ? sorted[0]!.minX : sorted[0]!.minY;
+    const maxEdge = isHoriz
+      ? sorted[sorted.length - 1]!.maxX
+      : sorted[sorted.length - 1]!.maxY;
+    const totalSizes = sorted.reduce(
+      (sum, b) => sum + (isHoriz ? b.width : b.height),
+      0,
+    );
+    const gap =
+      this.fixedGap !== undefined
+        ? this.fixedGap
+        : (maxEdge - minEdge - totalSizes) / (sorted.length - 1);
+
+    let cursor = minEdge;
+    for (const b of sorted) {
+      const node = findNodeById(doc.nodes, b.id);
+      if (node) {
+        if (isHoriz) {
+          node.transform.x += cursor - b.minX;
+        } else {
+          node.transform.y += cursor - b.minY;
+        }
+      }
+      cursor += (isHoriz ? b.width : b.height) + gap;
+    }
+  }
+
+  undo(): void {
+    const doc = this.getDoc();
+    for (const [id, orig] of this.snapshots) {
+      const n = findNodeById(doc.nodes, id);
+      if (n) {
+        n.transform.x = orig.x;
+        n.transform.y = orig.y;
+      }
+    }
+  }
+
+  getParams() {
+    return { mode: this.mode, fixedGap: this.fixedGap };
+  }
+}
+
+export class SlidePointCommand implements ICommand<{ slideFactor: number }> {
+  readonly id = 'path.slide';
+  readonly label = 'Slide Point';
+  readonly schema: CommandParamSchema[] = [
+    { key: 'slideFactor', label: 'Slide (-1..1)', type: 'number', min: -0.95, max: 0.95, step: 0.05 },
+  ];
+
+  private beforePoints: BezierPoint[] = [];
+
+  constructor(
+    private getDoc: DocAccessor,
+    private pathId: string,
+    private pointIds: string[],
+    private params: { slideFactor: number },
+  ) {
+    const path = findPathLookup(this.getDoc().nodes, pathId)?.path;
+    if (path) this.beforePoints = cloneValue(path.points);
+  }
+
+  execute(): void {
+    const path = findPathLookup(this.getDoc().nodes, this.pathId)?.path;
+    if (!path) return;
+    const targetSet = new Set(this.pointIds);
+    path.points = this.beforePoints.map((pt) =>
+      targetSet.has(pt.id) ? slidePointByFactor(pt, this.params.slideFactor) : cloneValue(pt),
+    );
+  }
+
+  undo(): void {
+    const path = findPathLookup(this.getDoc().nodes, this.pathId)?.path;
+    if (path) path.points = cloneValue(this.beforePoints);
+  }
+
+  getParams() {
+    return { ...this.params };
+  }
+
+  updateParams(next: Partial<{ slideFactor: number }>): void {
+    if (typeof next.slideFactor === 'number' && Number.isFinite(next.slideFactor)) {
+      this.params.slideFactor = Math.max(-0.95, Math.min(0.95, next.slideFactor));
+    }
+  }
+}
+
+export class ReplaceColorCommand implements ICommand<{ toColor: string }> {
+  readonly id = 'color.replaceAll';
+  readonly label = 'Replace Color';
+  readonly schema: CommandParamSchema[] = [
+    { key: 'toColor', label: 'New Color', type: 'color' },
+  ];
+
+  private beforeNodes: VectorNode[];
+
+  constructor(
+    private getDoc: DocAccessor,
+    private fromColor: string,
+    private params: { toColor: string },
+  ) {
+    this.beforeNodes = cloneValue(this.getDoc().nodes);
+  }
+
+  execute(): void {
+    const doc = this.getDoc();
+    doc.nodes = cloneValue(this.beforeNodes);
+    const match = this.fromColor.toUpperCase();
+    for (const node of flattenNodes(doc.nodes)) {
+      if (node.style?.fill) {
+        if (node.style.fill.color.toUpperCase() === match) {
+          node.style.fill.color = this.params.toColor;
+        }
+        if (node.style.fill.gradient) {
+          for (const stop of node.style.fill.gradient.stops) {
+            if (stop.color.toUpperCase() === match) {
+              stop.color = this.params.toColor;
+            }
+          }
+        }
+      }
+      if (node.style?.stroke?.color.toUpperCase() === match) {
+        node.style.stroke.color = this.params.toColor;
+      }
+    }
+  }
+
+  undo(): void {
+    this.getDoc().nodes = cloneValue(this.beforeNodes);
+  }
+
+  getParams() {
+    return { ...this.params };
+  }
+
+  updateParams(next: Partial<{ toColor: string }>): void {
+    if (typeof next.toColor === 'string') this.params.toColor = next.toColor;
+  }
+}
+
+export class PathfinderCommand implements ICommand<{ op: PathfinderOp; mode: PathfinderResultMode }> {
+  readonly id = 'path.pathfinder';
+  readonly label = 'Pathfinder Boolean';
+  private beforeNodes: VectorNode[];
+
+  constructor(
+    private getDoc: DocAccessor,
+    private nodeIdA: string,
+    private nodeIdB: string,
+    private op: PathfinderOp,
+    private onCreated?: (newNodeId: string) => void,
+    private mode: PathfinderResultMode = 'destructive',
+  ) {
+    this.beforeNodes = cloneValue(this.getDoc().nodes);
+  }
+
+  execute(): void {
+    const doc = this.getDoc();
+    doc.nodes = cloneValue(this.beforeNodes);
+
+    const nodeA = findNodeById(doc.nodes, this.nodeIdA);
+    const nodeB = findNodeById(doc.nodes, this.nodeIdB);
+    if (!nodeA || !nodeB) return;
+
+    if (this.mode === 'operator') {
+      const removedA = removeNodeById(doc.nodes, nodeA.id);
+      const removedB = removeNodeById(doc.nodes, nodeB.id);
+      if (!removedA || !removedB) return;
+      const mergeOp: MergePathsOperator = {
+        id: createId('merge'),
+        type: 'merge_paths',
+        enabled: true,
+        op: this.op,
+      };
+      const container: VectorNode = {
+        id: createId('pf_op'),
+        name: `Merge (${this.op})`,
+        type: 'group',
+        visible: true,
+        locked: false,
+        hasKeyframes: false,
+        transform: createDefaultTransform(),
+        style: cloneValue(removedA.style ?? removedB.style),
+        operators: [mergeOp],
+        children: [removedA, removedB],
+      };
+      doc.nodes.push(container);
+      this.onCreated?.(container.id);
+      return;
+    }
+
+    const pathA = nodeA.paths?.[0];
+    const pathB = nodeB.paths?.[0];
+    if (!pathA || !pathB) return;
+
+    const matA = getWorldMatrixForNode(doc.nodes, nodeA.id);
+    const matB = getWorldMatrixForNode(doc.nodes, nodeB.id);
+
+    const resultPaths = runPathfinderOnPaths(
+      pathA,
+      pathB,
+      this.op,
+      (p) => applyMatrix(matA, p.x, p.y),
+      (p) => applyMatrix(matB, p.x, p.y),
+    );
+    if (resultPaths.length === 0) return;
+
+    // Re-center points around bounding center
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const rp of resultPaths) {
+      for (const pt of rp.points) {
+        if (pt.x < minX) minX = pt.x;
+        if (pt.y < minY) minY = pt.y;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.y > maxY) maxY = pt.y;
+      }
+    }
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    for (const rp of resultPaths) {
+      for (const pt of rp.points) {
+        pt.x -= cx;
+        pt.y -= cy;
+      }
+    }
+
+    const newNode: VectorNode = {
+      id: createId('pf_layer'),
+      name: `${this.op.toUpperCase()} Shape`,
+      type: 'layer',
+      visible: true,
+      locked: false,
+      hasKeyframes: false,
+      transform: createDefaultTransform({ x: cx, y: cy }),
+      style: cloneValue(nodeA.style ?? nodeB.style),
+      paths: resultPaths,
+    };
+
+    removeNodeById(doc.nodes, nodeA.id);
+    removeNodeById(doc.nodes, nodeB.id);
+    doc.nodes.push(newNode);
+    this.onCreated?.(newNode.id);
+  }
+
+  undo(): void {
+    this.getDoc().nodes = cloneValue(this.beforeNodes);
+  }
+
+  getParams() {
+    return { op: this.op, mode: this.mode };
+  }
+}
+
+export class SplitPathCommand implements ICommand<{ pathId: string }> {
+  readonly id = 'path.scissorsSplit';
+  readonly label = 'Split Path (Scissors)';
+  private beforeNodes: VectorNode[];
+
+  constructor(
+    private getDoc: DocAccessor,
+    private pathId: string,
+    private localClick: Vec2,
+  ) {
+    this.beforeNodes = cloneValue(this.getDoc().nodes);
+  }
+
+  execute(): void {
+    const doc = this.getDoc();
+    doc.nodes = cloneValue(this.beforeNodes);
+    const lookup = findPathLookup(doc.nodes, this.pathId);
+    if (!lookup) return;
+    const effective =
+      lookup.path.type === 'path'
+        ? { points: lookup.path.points, closed: lookup.path.closed }
+        : {
+            points: getEffectiveContours(lookup.path).contours[0] ?? [],
+            closed: getEffectiveContours(lookup.path).closed,
+          };
+    const res = splitPathAtPosition(
+      effective.points,
+      effective.closed,
+      this.localClick,
+    );
+    lookup.path.type = 'path';
+    lookup.path.closed = res.closed;
+    lookup.path.points = res.first;
+    if (res.second && res.second.length >= 2) {
+      lookup.ownerNode.paths = lookup.ownerNode.paths ?? [];
+      lookup.ownerNode.paths.push({
+        id: createId('cut_path'),
+        name: `${lookup.path.name ?? 'Path'} Cut`,
+        type: 'path',
+        closed: false,
+        points: res.second,
+      });
+    }
+  }
+
+  undo(): void {
+    this.getDoc().nodes = cloneValue(this.beforeNodes);
+  }
+
+  getParams() {
+    return { pathId: this.pathId };
+  }
+}
+
+export class SetPathRotoBezierCommand implements ICommand<{ rotoBezier: boolean }> {
+  readonly id = 'path.rotoBezier';
+  readonly label = 'Toggle RotoBezier';
+  private beforeState = false;
+
+  constructor(
+    private getDoc: DocAccessor,
+    private pathId: string,
+    private rotoBezier: boolean,
+  ) {
+    const path = findPathLookup(this.getDoc().nodes, pathId)?.path;
+    this.beforeState = Boolean(path?.rotoBezier);
+  }
+
+  execute(): void {
+    const path = findPathLookup(this.getDoc().nodes, this.pathId)?.path;
+    if (path) path.rotoBezier = this.rotoBezier;
+  }
+
+  undo(): void {
+    const path = findPathLookup(this.getDoc().nodes, this.pathId)?.path;
+    if (path) path.rotoBezier = this.beforeState;
+  }
+
+  getParams() {
+    return { rotoBezier: this.rotoBezier };
+  }
+}
+
+export class SplitGroupsToLayersCommand implements ICommand<{ nodeId: string }> {
+  readonly id = 'layer.splitGroupsToLayers';
+  readonly label = 'Split Groups into Layers';
+  private beforeNodes: VectorNode[];
+
+  constructor(
+    private getDoc: DocAccessor,
+    private nodeId: string,
+  ) {
+    this.beforeNodes = cloneValue(this.getDoc().nodes);
+  }
+
+  execute(): void {
+    const doc = this.getDoc();
+    doc.nodes = cloneValue(this.beforeNodes);
+    const lookup = findNodeLookup(doc.nodes, this.nodeId);
+    if (!lookup || !lookup.node.children || lookup.node.children.length === 0) {
+      return;
+    }
+    const parent = lookup.node;
+    const promoted: VectorNode[] = parent.children!.map((child) => {
+      const c = cloneValue(child);
+      c.type = 'layer';
+      c.transform.x += parent.transform.x;
+      c.transform.y += parent.transform.y;
+      return c;
+    });
+    const idx = doc.nodes.findIndex((n) => n.id === parent.id);
+    if (idx >= 0) {
+      doc.nodes.splice(idx, 1, ...promoted);
+    } else {
+      removeNodeById(doc.nodes, parent.id);
+      doc.nodes.push(...promoted);
+    }
+  }
+
+  undo(): void {
+    this.getDoc().nodes = cloneValue(this.beforeNodes);
+  }
+
+  getParams() {
+    return { nodeId: this.nodeId };
+  }
+}
+
+export class SetShapeOperatorCommand implements ICommand<{ nodeId: string }> {
+  readonly id = 'shape.setOperator';
+  readonly label = 'Update Shape Operator';
+  private beforeOps: ShapeOperator[] | undefined;
+
+  constructor(
+    private getDoc: DocAccessor,
+    private nodeId: string,
+    private nextOps: ShapeOperator[],
+  ) {
+    const n = findNodeById(this.getDoc().nodes, nodeId);
+    this.beforeOps = cloneValue(n?.operators);
+  }
+
+  execute(): void {
+    const n = findNodeById(this.getDoc().nodes, this.nodeId);
+    if (n) n.operators = cloneValue(this.nextOps);
+  }
+
+  undo(): void {
+    const n = findNodeById(this.getDoc().nodes, this.nodeId);
+    if (n) n.operators = cloneValue(this.beforeOps);
+  }
+
+  getParams() {
+    return { nodeId: this.nodeId };
   }
 }
 

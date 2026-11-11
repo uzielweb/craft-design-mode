@@ -84,10 +84,15 @@ export const App: React.FC = () => {
         activeBridge.getCompBackgroundColor(),
         activeBridge.getInstalledFonts(),
       ]);
-      state.setPulledNodes(nodes, bgColor);
+      state.setCachedFonts(fonts);
+      state.setPulledNodes(
+        nodes,
+        state.preferences.matchCompBackground ? bgColor : undefined,
+        mode === 'all',
+      );
       setLastCalls(activeBridge.getTransport().getCommandLog());
       setStatusMsg(
-        `Pulled ${nodes.length} layers from ${activeBridge.hostName} (${useLiveBridge ? 'LIVE' : 'Simulated'}, ${fonts.length} fonts)`,
+        `Pulled ${nodes.length} (${mode}) from ${activeBridge.hostName} (${useLiveBridge ? 'LIVE' : 'Simulated'}, ${fonts.length} fonts)`,
       );
     } catch (err) {
       setStatusMsg(
@@ -199,6 +204,9 @@ export const App: React.FC = () => {
           <button type="button" className="dm-btn" onClick={() => void handlePull('all')}>
             Pull All
           </button>
+          <button type="button" className="dm-btn" onClick={() => void handlePull('selected')}>
+            Pull Selected
+          </button>
           <button type="button" className="dm-btn active" onClick={() => void handlePush()}>
             Push to Host
           </button>
@@ -218,7 +226,10 @@ export const App: React.FC = () => {
       >
         <LayersPanel store={store} />
         <CanvasPanel store={store} />
-        <PropertiesPanel store={store} />
+        <PropertiesPanel
+          store={store}
+          onRefreshFonts={() => activeBridge.getInstalledFonts()}
+        />
       </main>
 
       {/* Bridge Status & Last Dispatched Commands Strip */}

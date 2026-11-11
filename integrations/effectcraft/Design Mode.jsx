@@ -29,37 +29,42 @@
         inRy.characters = 5;
 
         var rowH = pEllipse.add("group");
-        rowH.add("statictext", undefined, "Hole (0-0.95):");
-        var inHole = rowH.add("edittext", undefined, "0.45");
-        inHole.characters = 5;
+        rowH.add("statictext", undefined, "Start:");
+        var inStart = rowH.add("edittext", undefined, "-90");
+        inStart.characters = 4;
         rowH.add("statictext", undefined, "Sweep:");
         var inSweep = rowH.add("edittext", undefined, "300");
         inSweep.characters = 4;
+        rowH.add("statictext", undefined, "Ratio:");
+        var inHole = rowH.add("edittext", undefined, "0.45");
+        inHole.characters = 4;
 
-        var btnCreateArc = pEllipse.add("button", undefined, "Create Parametric Arc");
+        var btnCreateArc = pEllipse.add("button", undefined, "Create DM Ellipse / Arc");
         btnCreateArc.onClick = function () {
             var comp = ensureComp();
             if (!comp) return;
             var rx = Math.max(4, parseFloat(inRx.text) || 120);
             var ry = Math.max(4, parseFloat(inRy.text) || 120);
             var hole = Math.max(0, Math.min(0.95, parseFloat(inHole.text) || 0));
+            var startDeg = parseFloat(inStart.text);
+            if (isNaN(startDeg)) startDeg = -90;
             var sweep = Math.max(1, Math.min(360, parseFloat(inSweep.text) || 360));
 
-            app.beginUndoGroup("Design Mode: Create Parametric Ellipse");
+            app.beginUndoGroup("Design Mode: Create DM Ellipse");
             try {
                 var shapeLayer = comp.layers.addShape();
-                shapeLayer.name = "Design Arc " + Math.round(sweep) + "deg";
+                shapeLayer.name = "DM Ellipse " + Math.round(sweep) + "deg";
                 var rootGroup = shapeLayer.property("ADBE Root Vectors Group");
                 var vecGroup = rootGroup.addProperty("ADBE Vector Group");
                 vecGroup.name = "Parametric Contour";
                 var contents = vecGroup.property("ADBE Vectors Group");
 
-                var outer = buildArcShape(rx, ry, -90, -90 + sweep, sweep >= 359.99, false);
+                var outer = buildArcShape(rx, ry, startDeg, startDeg + sweep, sweep >= 359.99, false);
                 var pathProp = contents.addProperty("ADBE Vector Shape - Group");
                 pathProp.property("ADBE Vector Shape").setValue(outer);
 
                 if (hole > 0.01) {
-                    var inner = buildArcShape(rx * hole, ry * hole, -90, -90 + sweep, sweep >= 359.99, true);
+                    var inner = buildArcShape(rx * hole, ry * hole, startDeg, startDeg + sweep, sweep >= 359.99, true);
                     var innerProp = contents.addProperty("ADBE Vector Shape - Group");
                     innerProp.property("ADBE Vector Shape").setValue(inner);
                 }
@@ -157,6 +162,22 @@
             })(alignModes[a]);
         }
 
+        // --- Operators & Style Quick Actions ---
+        var pOps = win.add("panel", undefined, "Operators & Style");
+        pOps.orientation = "row";
+        pOps.alignChildren = ["fill", "center"];
+        pOps.spacing = 4;
+        pOps.margins = 8;
+
+        var btnAddTrim = pOps.add("button", undefined, "+Trim");
+        btnAddTrim.onClick = function () { addShapeOperator("ADBE Vector Filter - Trim"); };
+        var btnAddRep = pOps.add("button", undefined, "+Repeat");
+        btnAddRep.onClick = function () { addShapeOperator("ADBE Vector Filter - Repeater"); };
+        var btnAddOffset = pOps.add("button", undefined, "+Offset");
+        btnAddOffset.onClick = function () { addShapeOperator("ADBE Vector Filter - Offset"); };
+        var btnAddRound = pOps.add("button", undefined, "+Round");
+        btnAddRound.onClick = function () { addShapeOperator("ADBE Vector Filter - RC"); };
+
         // --- Studio Web Bridge ---
         var btnStudio = win.add("button", undefined, "Open Full Canvas Studio (Browser)");
         btnStudio.onClick = function () {
@@ -205,6 +226,25 @@
                 else if (mode === "bottom") ny = comp.height - 100;
                 if (posProp.numKeys > 0) posProp.setValueAtTime(comp.time, [nx, ny]);
                 else posProp.setValue([nx, ny]);
+            }
+        } finally {
+            app.endUndoGroup();
+        }
+    }
+
+    function addShapeOperator(matchName) {
+        var comp = getActiveComp();
+        if (!comp || comp.selectedLayers.length === 0) {
+            alert("Select at least one Shape Layer.");
+            return;
+        }
+        app.beginUndoGroup("Design Mode: Add Operator");
+        try {
+            for (var i = 0; i < comp.selectedLayers.length; i++) {
+                var rootGroup = comp.selectedLayers[i].property("ADBE Root Vectors Group");
+                if (rootGroup && rootGroup.canAddProperty(matchName)) {
+                    rootGroup.addProperty(matchName);
+                }
             }
         } finally {
             app.endUndoGroup();

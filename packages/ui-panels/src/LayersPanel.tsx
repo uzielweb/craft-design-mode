@@ -6,6 +6,8 @@ import {
   createId,
   GroupNodesCommand,
   MutateDocumentCommand,
+  removeNodeById,
+  SplitGroupsToLayersCommand,
   SplitNodePathsCommand,
   type DesignStore,
   type VectorNode,
@@ -18,6 +20,11 @@ export interface LayersPanelProps {
 export const LayersPanel: React.FC<LayersPanelProps> = ({ store }) => {
   const state = useStore(store);
   const [query, setQuery] = useState('');
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    nodeId: string;
+  } | null>(null);
 
   const normalizedQuery = query.trim().toLowerCase();
 
@@ -104,21 +111,54 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({ store }) => {
     );
   };
 
+  const typeGlyph = (type: VectorNode['type']) => {
+    if (type === 'text') return 'T';
+    if (type === 'mask') return '◐';
+    if (type === 'group') return '▣';
+    return '★';
+  };
+
   const renderNode = (node: VectorNode, depth = 0): React.ReactNode => {
     if (!matchesQuery(node)) return null;
     const isSelected = state.selectedNodeIds.includes(node.id);
     const isIsolated = state.isolationStack.includes(node.id);
+    const isKeyObj = state.keyObjectId === node.id;
+    const hasChildren =
+      (node.children && node.children.length > 0) ||
+      (node.paths && node.paths.length > 0);
+    const isCollapsed = state.collapsedNodeIds.includes(node.id);
 
     return (
       <div key={node.id}>
         <div
           className={`dm-tree-row ${isSelected ? 'selected' : ''}`}
-          style={{ paddingLeft: 8 + depth * 14 }}
-          onClick={(e) => state.selectNodes([node.id], e.shiftKey || e.ctrlKey)}
+          style={{ paddingLeft: 6 + depth * 12 }}
+          onClick={(e) => {
+            setContextMenu(null);
+            state.selectNodes([node.id], e.shiftKey || e.ctrlKey);
+          }}
           onDoubleClick={() => state.enterIsolation(node.id)}
-          title="Click to select, Double-click to Isolate"
+          onContextMenu={(e) => {
+            e.preventDefault();
+            state.selectNodes([node.id]);
+            setContextMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
+          }}
+          title="Click to select, Double-click to Isolate, Right-click for options"
         >
-          <span className="dm-badge">{node.type}</span>
+          <button
+            type="button"
+            className="dm-btn"
+            style={{ padding: '0 4px', opacity: hasChildren ? 1 : 0.25 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (hasChildren) state.toggleNodeCollapsed(node.id);
+            }}
+          >
+            {isCollapsed ? '▸' : '▾'}
+          </button>
+
+          <span style={{ color: '#38bdf8', fontSize: 11 }}>{typeGlyph(node.type)}</span>
+
           <span
             style={{
               flex: 1,
@@ -131,10 +171,11 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({ store }) => {
             {node.name}
           </span>
 
+          {isKeyObj && <span className="dm-badge" style={{ color: '#34d399' }}>KEY</span>}
           {isIsolated && <span className="dm-badge kf">ISO</span>}
           {node.hasKeyframes && (
-            <span className="dm-badge kf" title="Has Keyframes (Push uses setValueAtTime)">
-              ◆ KF
+            <span className="dm-badge kf" title="Has Keyframes">
+              ◆
             </span>
           )}
 
@@ -146,7 +187,6 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({ store }) => {
               e.stopPropagation();
               toggleProp(node.id, 'visible');
             }}
-            title="Toggle Visibility"
           >
             {node.visible ? '👁' : '—'}
           </button>
@@ -159,57 +199,56 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({ store }) => {
               e.stopPropagation();
               toggleProp(node.id, 'locked');
             }}
-            title="Toggle Lock"
           >
             {node.locked ? '🔒' : '🔓'}
           </button>
         </div>
 
-        {/* Paths inside this node */}
-        {node.paths?.map((path) => {
-          const isPathSel = state.selectedPathIds.includes(path.id);
-          return (
-            <div
-              key={path.id}
-              className={`dm-tree-row ${isPathSel ? 'selected' : ''}`}
-              style={{ paddingLeft: 22 + depth * 14, opacity: 0.9 }}
-              onClick={() => state.selectPath(path.id, node.id)}
-            >
-              <span className="dm-badge">
-                {path.type === 'parametric_ellipse'
-                  ? 'ellipse'
-                  : path.type === 'parametric_line'
-                    ? 'line'
-                    : 'path'}
-              </span>
-              <span style={{ flex: 1, fontSize: 11 }}>
-                {path.name ?? path.id}
-              </span>
-            </div>
-          );
-        })}
+        {!isCollapsed &&
+          node.paths?.map((path) => {
+            const isPathSel = state.selectedPathIds.includes(path.id);
+            return (
+              <div
+                key={path.id}
+                className={`dm-tree-row ${isPathSel ? 'selected' : ''}`}
+                style={{ paddingLeft: 26 + depth * 12, opacity: 0.9 }}
+                onClick={() => state.selectPath(path.id, node.id)}
+              >
+                <span className="dm-badge">
+                  {path.type.replace('parametric_', '')}
+                </span>
+                <span style={{ flex: 1, fontSize: 11 }}>
+                  {path.name ?? path.id}
+                </span>
+              </div>
+            );
+          })}
 
-        {node.children?.map((child) => renderNode(child, depth + 1))}
+        {!isCollapsed && node.children?.map((child) => renderNode(child, depth + 1))}
       </div>
     );
   };
 
   return (
-    <div className="dm-panel" style={{ width: 280 }}>
+    <div
+      className="dm-panel"
+      style={{ width: 280, position: 'relative' }}
+      onClick={() => setContextMenu(null)}
+    >
       <div className="dm-panel-header">
         <span>Layers</span>
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 3 }}>
           <button type="button" className="dm-btn" onClick={handleAddShapeLayer}>
-            + Layer
+            +
           </button>
           <button
             type="button"
             className="dm-btn"
             disabled={state.selectedNodeIds.length === 0}
             onClick={handleGroup}
-            title="Group Selection (Ctrl+G)"
+            title="Group (Ctrl+G)"
           >
-            Group
+            Grp
           </button>
           <button
             type="button"
@@ -219,6 +258,22 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({ store }) => {
             title="Split Paths / Ungroup"
           >
             Split
+          </button>
+          <button
+            type="button"
+            className="dm-btn"
+            onClick={() => state.setAllCollapsed(false)}
+            title="Expand All"
+          >
+            ⊞
+          </button>
+          <button
+            type="button"
+            className="dm-btn"
+            onClick={() => state.setAllCollapsed(true)}
+            title="Collapse All"
+          >
+            ⊟
           </button>
         </div>
       </div>
@@ -236,6 +291,93 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({ store }) => {
       <div style={{ flex: 1, overflowY: 'auto', padding: 6 }}>
         {state.doc.nodes.map((node) => renderNode(node, 0))}
       </div>
+
+      {contextMenu && (
+        <div
+          className="dm-hud-chip"
+          style={{
+            position: 'fixed',
+            top: contextMenu.y,
+            left: contextMenu.x,
+            zIndex: 50,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+            minWidth: 185,
+          }}
+        >
+          <button
+            type="button"
+            className="dm-btn"
+            onClick={() => {
+              state.executeCommand(
+                new SplitGroupsToLayersCommand(
+                  () => store.getState().doc,
+                  contextMenu.nodeId,
+                ),
+              );
+              setContextMenu(null);
+            }}
+          >
+            Split Groups into Layers
+          </button>
+          <button
+            type="button"
+            className="dm-btn"
+            onClick={() => {
+              state.executeCommand(
+                new SplitNodePathsCommand(
+                  () => store.getState().doc,
+                  contextMenu.nodeId,
+                ),
+              );
+              setContextMenu(null);
+            }}
+          >
+            Split Paths / Ungroup
+          </button>
+          <button
+            type="button"
+            className="dm-btn"
+            onClick={() => {
+              state.setKeyObject(contextMenu.nodeId);
+              state.setAlignToMode('key_object');
+              setContextMenu(null);
+            }}
+          >
+            Set as Key Object
+          </button>
+          <button
+            type="button"
+            className="dm-btn"
+            onClick={() => {
+              state.enterIsolation(contextMenu.nodeId);
+              setContextMenu(null);
+            }}
+          >
+            Isolate Subtree
+          </button>
+          <button
+            type="button"
+            className="dm-btn warn"
+            onClick={() => {
+              state.executeCommand(
+                new MutateDocumentCommand(
+                  () => store.getState().doc,
+                  'Delete Layer',
+                  (doc) => {
+                    removeNodeById(doc.nodes, contextMenu.nodeId);
+                  },
+                ),
+              );
+              state.clearSelection();
+              setContextMenu(null);
+            }}
+          >
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   );
 };

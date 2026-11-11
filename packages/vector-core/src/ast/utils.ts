@@ -1,4 +1,5 @@
 import type {
+  ColorUsageEntry,
   NodeTransform,
   VectorDocument,
   VectorNode,
@@ -159,6 +160,49 @@ export function flattenNodes(nodes: VectorNode[]): VectorNode[] {
   };
   visit(nodes);
   return result;
+}
+
+/**
+ * Scans the entire document for all fill/stroke/gradient colors,
+ * sorted descending by instance count (matching the Design Mode Colors panel).
+ */
+export function collectDocumentColorUsages(nodes: VectorNode[]): ColorUsageEntry[] {
+  const counts = new Map<string, { count: number; nodeIds: Set<string> }>();
+
+  const record = (hex: string | undefined, nodeId: string) => {
+    if (!hex) return;
+    const norm = hex.toUpperCase();
+    let entry = counts.get(norm);
+    if (!entry) {
+      entry = { count: 0, nodeIds: new Set() };
+      counts.set(norm, entry);
+    }
+    entry.count++;
+    entry.nodeIds.add(nodeId);
+  };
+
+  for (const node of flattenNodes(nodes)) {
+    if (node.style?.fill) {
+      if (node.style.fill.gradient) {
+        for (const stop of node.style.fill.gradient.stops) {
+          record(stop.color, node.id);
+        }
+      } else {
+        record(node.style.fill.color, node.id);
+      }
+    }
+    if (node.style?.stroke && node.style.stroke.width > 0) {
+      record(node.style.stroke.color, node.id);
+    }
+  }
+
+  return Array.from(counts.entries())
+    .map(([color, data]) => ({
+      color,
+      count: data.count,
+      nodeIds: Array.from(data.nodeIds),
+    }))
+    .sort((a, b) => b.count - a.count || a.color.localeCompare(b.color));
 }
 
 export function removeNodeById(
